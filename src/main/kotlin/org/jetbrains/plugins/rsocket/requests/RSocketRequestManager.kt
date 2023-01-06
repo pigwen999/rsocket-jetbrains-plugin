@@ -8,9 +8,7 @@ import com.intellij.httpClient.execution.common.CommonClientResponseBody
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.project.Project
 import com.intellij.util.io.toByteArray
-import io.netty.buffer.ByteBufAllocator
-import io.netty.buffer.CompositeByteBuf
-import io.netty.buffer.Unpooled
+import io.netty.buffer.*
 import io.rsocket.Payload
 import io.rsocket.RSocket
 import io.rsocket.broker.common.Id
@@ -21,6 +19,7 @@ import io.rsocket.broker.frames.Address
 import io.rsocket.broker.frames.AddressFlyweight
 import io.rsocket.broker.frames.RouteSetupFlyweight
 import io.rsocket.core.RSocketConnector
+import io.rsocket.metadata.AuthMetadataCodec
 import io.rsocket.metadata.CompositeMetadataCodec.encodeAndAddMetadata
 import io.rsocket.metadata.TaggingMetadataCodec
 import io.rsocket.metadata.WellKnownMimeType
@@ -33,6 +32,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import org.jetbrains.plugins.rsocket.restClient.execution.RSocketBodyFileHint
 import org.jetbrains.plugins.rsocket.restClient.execution.RSocketRequest
 import reactor.core.publisher.Hooks
+import java.nio.charset.StandardCharsets
 import java.util.*
 import kotlin.experimental.or
 
@@ -227,6 +227,7 @@ class RSocketRequestManager(private val project: Project) : Disposable {
     private fun compositeMetadata(rsocketRequest: RSocketRequest): CompositeByteBuf {
         val compositeMetadataBuffer = ByteBufAllocator.DEFAULT.compositeBuffer()
         val routingMetadata = rsocketRequest.routingMetadata()
+        val authData = rsocketRequest.authorization
         if (routingMetadata[0].isNotEmpty()) {
             val routingMetaData = TaggingMetadataCodec.createTaggingContent(ByteBufAllocator.DEFAULT, routingMetadata)
             encodeAndAddMetadata(
@@ -234,6 +235,21 @@ class RSocketRequestManager(private val project: Project) : Disposable {
                 WellKnownMimeType.MESSAGE_RSOCKET_ROUTING,
                 routingMetaData
             )
+            if(authData!!.startsWith("Bearer")) {
+                encodeAndAddMetadata(
+                    compositeMetadataBuffer, ByteBufAllocator.DEFAULT,
+                    WellKnownMimeType.MESSAGE_RSOCKET_AUTHENTICATION,
+                    AuthMetadataCodec.encodeBearerMetadata(PooledByteBufAllocator(true), authData.split(" ")[1].toCharArray())
+                )
+            }
+            if(authData!!.startsWith("Basic")) {
+                encodeAndAddMetadata(
+                    compositeMetadataBuffer, ByteBufAllocator.DEFAULT,
+                    "message/x.rsocket.authentication.basic.v0",
+                    basicAuth(rsocketRequest)
+                )
+            }
+
             val dataType = WellKnownMimeType.fromString(rsocketRequest.dataMimeType);
             encodeAndAddMetadata(
                 compositeMetadataBuffer, ByteBufAllocator.DEFAULT,
@@ -242,6 +258,18 @@ class RSocketRequestManager(private val project: Project) : Disposable {
             )
         }
         return compositeMetadataBuffer
+    }
+
+    private fun basicAuth(rsocketRequest: RSocketRequest): ByteBuf {
+        val authorization = rsocketRequest.authorization
+        val split = authorization!!.split(":")
+        val username = split[0]!!.toByteArray(StandardCharsets.UTF_8)
+        val password = split[1]!!.toByteArray(StandardCharsets.UTF_8)
+        val buf = PooledByteBufAllocator(true).buffer()
+        buf.writeInt(username.size)
+        buf.writeBytes(username)
+        buf.writeBytes(password)
+        return buf
     }
 
     private fun jsonMetadata(rsocketRequest: RSocketRequest): String {
